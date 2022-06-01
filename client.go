@@ -36,6 +36,11 @@ func NewClient(r RedisConnOpt) *Client {
 	return &Client{broker: rdb.NewRDB(c)}
 }
 
+// NewWithClient returns a new Client instance given a redis connection option with given `redis.UniversalClient`.
+func NewWithClient(cli redis.UniversalClient) *Client {
+	return &Client{broker: rdb.NewRDB(cli)}
+}
+
 type OptionType int
 
 const (

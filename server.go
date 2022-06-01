@@ -550,6 +550,163 @@ func NewServer(r RedisConnOpt, cfg Config) *Server {
 	}
 }
 
+// NewServerWithClient returns a new Server with given `redis.UniversalClient`
+// and server configuration.
+func NewServerWithClient(cli redis.UniversalClient, cfg Config) *Server {
+	baseCtxFn := cfg.BaseContext
+	if baseCtxFn == nil {
+		baseCtxFn = context.Background
+	}
+	n := cfg.Concurrency
+	if n < 1 {
+		n = runtime.NumCPU()
+	}
+	delayFunc := cfg.RetryDelayFunc
+	if delayFunc == nil {
+		delayFunc = DefaultRetryDelayFunc
+	}
+	isFailureFunc := cfg.IsFailure
+	if isFailureFunc == nil {
+		isFailureFunc = defaultIsFailureFunc
+	}
+	queues := make(map[string]int)
+	for qname, p := range cfg.Queues {
+		if err := base.ValidateQueueName(qname); err != nil {
+			continue // ignore invalid queue names
+		}
+		if p > 0 {
+			queues[qname] = p
+		}
+	}
+	if len(queues) == 0 {
+		queues = defaultQueueConfig
+	}
+	var qnames []string
+	for q := range queues {
+		qnames = append(qnames, q)
+	}
+	shutdownTimeout := cfg.ShutdownTimeout
+	if shutdownTimeout == 0 {
+		shutdownTimeout = defaultShutdownTimeout
+	}
+	healthcheckInterval := cfg.HealthCheckInterval
+	if healthcheckInterval == 0 {
+		healthcheckInterval = defaultHealthCheckInterval
+	}
+	// TODO: Create a helper to check for zero value and fall back to default (e.g. getDurationOrDefault())
+	groupGracePeriod := cfg.GroupGracePeriod
+	if groupGracePeriod == 0 {
+		groupGracePeriod = defaultGroupGracePeriod
+	}
+	if groupGracePeriod < time.Second {
+		panic("GroupGracePeriod cannot be less than a second")
+	}
+	logger := log.NewLogger(cfg.Logger)
+	loglevel := cfg.LogLevel
+	if loglevel == level_unspecified {
+		loglevel = InfoLevel
+	}
+	logger.SetLevel(toInternalLogLevel(loglevel))
+
+	rdb := rdb.NewRDB(cli)
+	starting := make(chan *workerInfo)
+	finished := make(chan *base.TaskMessage)
+	syncCh := make(chan *syncRequest)
+	srvState := &serverState{value: srvStateNew}
+	cancels := base.NewCancelations()
+
+	syncer := newSyncer(syncerParams{
+		logger:     logger,
+		requestsCh: syncCh,
+		interval:   5 * time.Second,
+	})
+	heartbeater := newHeartbeater(heartbeaterParams{
+		logger:         logger,
+		broker:         rdb,
+		interval:       5 * time.Second,
+		concurrency:    n,
+		queues:         queues,
+		strictPriority: cfg.StrictPriority,
+		state:          srvState,
+		starting:       starting,
+		finished:       finished,
+	})
+	delayedTaskCheckInterval := cfg.DelayedTaskCheckInterval
+	if delayedTaskCheckInterval == 0 {
+		delayedTaskCheckInterval = defaultDelayedTaskCheckInterval
+	}
+	forwarder := newForwarder(forwarderParams{
+		logger:   logger,
+		broker:   rdb,
+		queues:   qnames,
+		interval: delayedTaskCheckInterval,
+	})
+	subscriber := newSubscriber(subscriberParams{
+		logger:       logger,
+		broker:       rdb,
+		cancelations: cancels,
+	})
+	processor := newProcessor(processorParams{
+		logger:          logger,
+		broker:          rdb,
+		retryDelayFunc:  delayFunc,
+		baseCtxFn:       baseCtxFn,
+		isFailureFunc:   isFailureFunc,
+		syncCh:          syncCh,
+		cancelations:    cancels,
+		concurrency:     n,
+		queues:          queues,
+		strictPriority:  cfg.StrictPriority,
+		errHandler:      cfg.ErrorHandler,
+		shutdownTimeout: shutdownTimeout,
+		starting:        starting,
+		finished:        finished,
+	})
+	recoverer := newRecoverer(recovererParams{
+		logger:         logger,
+		broker:         rdb,
+		retryDelayFunc: delayFunc,
+		isFailureFunc:  isFailureFunc,
+		queues:         qnames,
+		interval:       1 * time.Minute,
+	})
+	healthchecker := newHealthChecker(healthcheckerParams{
+		logger:          logger,
+		broker:          rdb,
+		interval:        healthcheckInterval,
+		healthcheckFunc: cfg.HealthCheckFunc,
+	})
+	janitor := newJanitor(janitorParams{
+		logger:   logger,
+		broker:   rdb,
+		queues:   qnames,
+		interval: 8 * time.Second,
+	})
+	aggregator := newAggregator(aggregatorParams{
+		logger:          logger,
+		broker:          rdb,
+		queues:          qnames,
+		gracePeriod:     groupGracePeriod,
+		maxDelay:        cfg.GroupMaxDelay,
+		maxSize:         cfg.GroupMaxSize,
+		groupAggregator: cfg.GroupAggregator,
+	})
+	return &Server{
+		logger:        logger,
+		broker:        rdb,
+		state:         srvState,
+		forwarder:     forwarder,
+		processor:     processor,
+		syncer:        syncer,
+		heartbeater:   heartbeater,
+		subscriber:    subscriber,
+		recoverer:     recoverer,
+		healthchecker: healthchecker,
+		janitor:       janitor,
+		aggregator:    aggregator,
+	}
+}
+
 // A Handler processes tasks.
 //
 // ProcessTask should return nil if the processing of a task
