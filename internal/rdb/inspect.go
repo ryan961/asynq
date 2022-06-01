@@ -1434,7 +1434,7 @@ if state == "active" then
 	return -1
 end
 if state == "pending" then
-	if redis.call("LREM", ARGV[2] .. state, 0, ARGV[1]) == 0 then
+	if redis.call("LREM", ARGV[2] .. state, 1, ARGV[1]) == 0 then
 		return redis.error_reply("task is not found in list: " .. tostring(ARGV[2] .. state))
 	end
 elseif state == "aggregating" then
