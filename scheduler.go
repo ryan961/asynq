@@ -147,7 +147,6 @@ func (j *enqueueJob) Run() {
 		j.postEnqueueFunc(info, err)
 	}
 	if err != nil {
-		j.logger.Errorf("scheduler could not enqueue a task %+v: %v", j.task, err)
 		if j.errHandler != nil {
 			j.errHandler(j.task, j.opts, err)
 		}
@@ -160,7 +159,7 @@ func (j *enqueueJob) Run() {
 	}
 	err = j.rdb.RecordSchedulerEnqueueEvent(j.id.String(), event)
 	if err != nil {
-		j.logger.Errorf("scheduler could not record enqueue event of enqueued task %+v: %v", j.task, err)
+		j.logger.Warnf("scheduler could not record enqueue event of enqueued task %s: %v", info.ID, err)
 	}
 }
 
@@ -275,6 +274,7 @@ func (s *Scheduler) runHeartbeater() {
 		case <-s.done:
 			s.logger.Debugf("Scheduler heatbeater shutting down")
 			s.rdb.ClearSchedulerEntries(s.id)
+			ticker.Stop()
 			return
 		case <-ticker.C:
 			s.beat()
