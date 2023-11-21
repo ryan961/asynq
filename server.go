@@ -831,8 +831,22 @@ func (srv *Server) Shutdown() {
 	srv.heartbeater.shutdown()
 	srv.wg.Wait()
 
-	srv.broker.Close()
 	srv.logger.Info("Exiting")
+}
+
+// Close closes broker after shutting shut down the server.
+func (srv *Server) Close() {
+	srv.state.mu.Lock()
+	if srv.state.value != srvStateClosed {
+		// Invalid calll to Close, server can only close broker in Closed state.
+		srv.state.mu.Unlock()
+		return
+	}
+	srv.state.mu.Unlock()
+
+	srv.logger.Info("Closing broker")
+	srv.broker.Close()
+	srv.logger.Info("Broker closed")
 }
 
 // Stop signals the server to stop pulling new tasks off queues.
